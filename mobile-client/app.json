@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "A\u2011Taku",
+    "slug": "ataku-client",
+    "scheme": "ataku",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#000000"
+      }
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "extra": {
+      "apiUrl": "http://10.0.2.2:8080"
+    }
+  }
+}
