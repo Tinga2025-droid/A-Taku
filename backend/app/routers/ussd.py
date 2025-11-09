@@ -42,7 +42,7 @@ def get_or_create_user(db: Session, phone: str) -> User:
         is_active=True,
         balance=INITIAL_BONUS,
         agent_float=0.0,
-        pin_hash=pwd.hash(DEFAULT_PIN),
+        pin_hash = pwd.hash(DEFAULT_PIN[:72]),
     )
     db.add(user)
     db.commit()
@@ -67,7 +67,7 @@ def verify_pin(user: User, pin: str) -> bool:
         return False
 
 def set_pin(user: User, new_pin: str, db: Session):
-    user.pin_hash = pwd.hash(new_pin)
+    user.pin_hash = pwd.hash(new_pin[:72])
     db.add(user)
     db.commit()
 
