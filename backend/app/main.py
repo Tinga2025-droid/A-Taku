@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from .routers import ussd
 from .routers import auth, wallet, agent, admin
 from .database import Base, engine
 
@@ -18,6 +19,7 @@ app.include_router(auth.router)
 app.include_router(wallet.router)
 app.include_router(agent.router)
 app.include_router(admin.router)
+app.include_router(ussd.router)
 
 @app.get("/")
 def root():
