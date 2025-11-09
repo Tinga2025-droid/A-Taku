@@ -6,7 +6,7 @@ from .database import Base, engine
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="A‑Taku API", version="1.0.0")
+app = FastAPI(title="A-Taku API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,4 +23,7 @@ app.include_router(ussd.router)
 
 @app.get("/")
 def root():
-    return {"ok": True, "service": "A‑Taku API"}
+    return {"ok": True, "service": "A-Taku API"}
+@app.get("/healthz")
+def health_check():
+    return {"ok": True}
