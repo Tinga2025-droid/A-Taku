@@ -1,5 +1,6 @@
 # app/routers/ussd.py
-from fastapi import APIRouter, Depends, Form, Response
+from fastapi import APIRouter, Depends, Form
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from datetime import datetime
 from passlib.context import CryptContext
@@ -10,30 +11,28 @@ from ..models import User, Tx, TxType, FeesConfig
 router = APIRouter(tags=["ussd"])
 
 # --- Configs de negócio ---
-INITIAL_BONUS = 25.0                   # saldo inicial ao criar conta
-DEFAULT_PIN = "0000"                   # pin padrão (obriga troca)
-AIRTIME_MIN = 20                       # compra de crédito mínimo (MZN)
+INITIAL_BONUS = 25.0
+DEFAULT_PIN = "0000"
+AIRTIME_MIN = 20
 
-# ✅ Agora usando PBKDF2 (compatível com Render, sem limite de 72 bytes)
+# PBKDF2
 pwd = CryptContext(
     schemes=["pbkdf2_sha256"],
     deprecated="auto"
 )
 
-# ------------- Helpers -------------
+# -------- Helpers --------
 def e164(phone: str) -> str:
-    """Normaliza número (+25884xxxxxxx ou 84xxxxxxx → +25884xxxxxxx)."""
     p = phone.strip().replace(" ", "")
     if p.startswith("00"):
         p = "+" + p[2:]
     if not p.startswith("+"):
-        # heurística rápida para Moçambique
         if p.startswith(("84", "85", "86", "82")):
             p = "+258" + p
         elif p.startswith("258"):
             p = "+" + p
         else:
-            p = "+" + p  # última tentativa
+            p = "+" + p
     return p
 
 def get_or_create_user(db: Session, phone: str) -> User:
@@ -46,12 +45,11 @@ def get_or_create_user(db: Session, phone: str) -> User:
         is_active=True,
         balance=INITIAL_BONUS,
         agent_float=0.0,
-        pin_hash=pwd.hash(DEFAULT_PIN),  # ✅ sem [:72]
+        pin_hash=pwd.hash(DEFAULT_PIN),
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    # registra TX de bônus
     tx = Tx(
         ref=f"BONUS-{int(datetime.utcnow().timestamp())}-{user.id}",
         type=TxType.DEPOSIT,
@@ -71,7 +69,7 @@ def verify_pin(user: User, pin: str) -> bool:
         return False
 
 def set_pin(user: User, new_pin: str, db: Session):
-    user.pin_hash = pwd.hash(new_pin)  # ✅ sem [:72]
+    user.pin_hash = pwd.hash(new_pin)
     db.add(user)
     db.commit()
 
@@ -90,22 +88,18 @@ def con(text: str) -> str:
 def balance_line(user: User) -> str:
     return f"Saldo: {user.balance:.2f} MZN"
 
-def last_n_txs(db: Session, user: User, n: int = 5) -> list[Tx]:
+def last_n_txs(db: Session, user: User, n: int = 5):
     return (
         db.query(Tx)
-        .filter(
-            (Tx.from_user_id == user.id) | (Tx.to_user_id == user.id)
-        )
+        .filter((Tx.from_user_id == user.id) | (Tx.to_user_id == user.id))
         .order_by(Tx.created_at.desc())
         .limit(n)
         .all()
     )
 
-def apply_cashout_fees(db: Session, amount: float) -> tuple[float, float]:
-    """Retorna (fee, total_debito) conforme tabela fees_config (se existir)."""
+def apply_cashout_fees(db: Session, amount: float):
     cfg = db.query(FeesConfig).first()
     if not cfg:
-        # Default simples: 1.5% min 5, max 150
         pct, fmin, fmax = 1.5, 5.0, 150.0
     else:
         pct, fmin, fmax = cfg.cashout_fee_pct, cfg.cashout_fee_min, cfg.cashout_fee_max
@@ -113,7 +107,7 @@ def apply_cashout_fees(db: Session, amount: float) -> tuple[float, float]:
     fee = max(fmin, min(fee, fmax))
     return (fee, amount + fee)
 
-# ------------- Menus -------------
+# -------- Menus --------
 def main_menu() -> str:
     return con(
         "Bem-vindo ao A-Taku\n"
@@ -133,22 +127,17 @@ def require_pin_menu(prefix: str = "") -> str:
 def force_change_pin_menu(prefix: str = "") -> str:
     return con(prefix + "Defina novo PIN (4 dígitos):")
 
-# ------------- Endpoint -------------
-@router.post("/ussd")
+# -------------------------------------------------
+#  USSD CALLBACK (CORRIGIDO PARA Text/Plain)
+# -------------------------------------------------
+@router.post("/ussd", response_class=PlainTextResponse)
 def ussd_callback(
-    response: Response,
     sessionId: str = Form(...),
     serviceCode: str = Form(...),
     phoneNumber: str = Form(...),
     text: str = Form(default=""),
     db: Session = Depends(get_db),
 ):
-    """
-    AfricasTalking USSD espera 'text' crescendo com '*' entre passos.
-    Respondemos com 'CON ' (continuar) ou 'END ' (finalizar).
-    """
-    response.headers["Content-Type"] = "text/plain; charset=utf-8"
-
     phone = e164(phoneNumber)
     parts = [p for p in text.split("*") if p != ""] if text else []
 
@@ -156,12 +145,10 @@ def ussd_callback(
     if not parts:
         return main_menu()
 
-    # 1) Criar conta
+    # --- 1) Criar conta ---
     if parts[0] == "1":
         user = get_or_create_user(db, phone)
-        # Se acabou de criar (ou já existia), força troca de PIN se ainda for 0000
         if verify_pin(user, DEFAULT_PIN):
-            # Ainda não trocou PIN
             if len(parts) == 1:
                 return force_change_pin_menu("Conta criada. Bónus 25 MZN.\n")
             elif len(parts) == 2:
@@ -170,13 +157,11 @@ def ussd_callback(
                     return force_change_pin_menu("PIN inválido. Use 4 dígitos (≠ 0000).\n")
                 set_pin(user, new_pin, db)
                 return end("PIN definido com sucesso. Faça operações no menu principal.")
-        # Já tem PIN trocado
         return end("Sua conta já existe. Utilize as opções do menu.")
 
-    # 2) Entrar (apenas valida PIN; o número vem do telco)
+    # --- 2) Entrar ---
     if parts[0] == "2":
         user = get_or_create_user(db, phone)
-        # Se PIN ainda é padrão, obriga trocar
         if verify_pin(user, DEFAULT_PIN):
             if len(parts) == 1:
                 return force_change_pin_menu("PIN padrão detectado.\n")
@@ -186,7 +171,6 @@ def ussd_callback(
                     return force_change_pin_menu("PIN inválido. Use 4 dígitos (≠ 0000).\n")
                 set_pin(user, new_pin, db)
                 return end("PIN atualizado. Pode continuar a usar o serviço.")
-        # Caso normal: pedir PIN e confirmar
         if len(parts) == 1:
             return require_pin_menu("Entrar — ")
         elif len(parts) == 2:
@@ -195,7 +179,7 @@ def ussd_callback(
                 return end("PIN inválido ou expirado.")
             return end(f"Login OK. {balance_line(user)}")
 
-    # 3) Ver saldo / Minha conta
+    # --- 3) Saldo ---
     if parts[0] == "3":
         user = get_or_create_user(db, phone)
         if verify_pin(user, DEFAULT_PIN):
@@ -208,7 +192,7 @@ def ussd_callback(
                 return end("PIN inválido.")
             return end(balance_line(user))
 
-    # 4) Transferir dinheiro
+    # --- 4) Transferência ---
     if parts[0] == "4":
         user = get_or_create_user(db, phone)
         if verify_pin(user, DEFAULT_PIN):
@@ -219,7 +203,7 @@ def ussd_callback(
             pin = parts[1]
             if not verify_pin(user, pin):
                 return end("PIN inválido.")
-            return con("Digite número do destinatário (ex: 84xxxxxxx ou +25884xxxxxxx):")
+            return con("Digite número do destinatário:")
         elif len(parts) == 3:
             to_raw = parts[2]
             to_phone = e164(to_raw)
@@ -229,13 +213,11 @@ def ussd_callback(
         elif len(parts) == 4:
             amount = safe_int(parts[3])
             if amount is None or amount <= 0:
-                return con("Valor inválido. Digite um valor inteiro positivo:")
+                return con("Valor inválido. Digite novamente:")
             to_phone = e164(parts[2])
-            # cria (ou obtém) destinatário
             to_user = get_or_create_user(db, to_phone)
             if user.balance < amount:
                 return end("Saldo insuficiente.")
-            # efetiva
             user.balance -= float(amount)
             to_user.balance += float(amount)
             db.add(user); db.add(to_user)
@@ -252,7 +234,7 @@ def ussd_callback(
             db.commit()
             return end(f"Transferência OK: {amount} MZN para {to_phone}. {balance_line(user)}")
 
-    # 5) Levantar (cashout)
+    # --- 5) Cashout ---
     if parts[0] == "5":
         user = get_or_create_user(db, phone)
         if verify_pin(user, DEFAULT_PIN):
@@ -263,11 +245,11 @@ def ussd_callback(
             pin = parts[1]
             if not verify_pin(user, pin):
                 return end("PIN inválido.")
-            return con("Digite o valor a levantar (MZN):")
+            return con("Digite o valor a levantar:")
         elif len(parts) == 3:
             amount = safe_int(parts[2])
             if amount is None or amount <= 0:
-                return con("Valor inválido. Digite um inteiro positivo:")
+                return con("Valor inválido. Digite um inteiro:")
             fee, total = apply_cashout_fees(db, float(amount))
             if user.balance < total:
                 return end("Saldo insuficiente para cobrir valor + taxa.")
@@ -286,7 +268,7 @@ def ussd_callback(
             db.commit()
             return end(f"Levantamento OK: {amount:.2f} MZN (taxa {fee:.2f}). {balance_line(user)}")
 
-    # 6) Pagar serviços (genérico: ref + valor)
+    # --- 6) Pagamentos ---
     if parts[0] == "6":
         user = get_or_create_user(db, phone)
         if verify_pin(user, DEFAULT_PIN):
@@ -304,7 +286,7 @@ def ussd_callback(
             ref = parts[2]
             amount = safe_int(parts[3])
             if amount is None or amount <= 0:
-                return con("Valor inválido. Digite um inteiro positivo:")
+                return con("Valor inválido. Digite novamente:")
             if user.balance < amount:
                 return end("Saldo insuficiente.")
             user.balance -= float(amount)
@@ -322,7 +304,7 @@ def ussd_callback(
             db.commit()
             return end(f"Pagamento OK ref {ref}: {amount} MZN. {balance_line(user)}")
 
-    # 7) Extrato (últimas 5)
+    # --- 7) Extrato ---
     if parts[0] == "7":
         user = get_or_create_user(db, phone)
         if verify_pin(user, DEFAULT_PIN):
@@ -345,7 +327,7 @@ def ussd_callback(
             body = "\n".join(lines)
             return end(f"{body}\n{balance_line(user)}")
 
-    # 8) Comprar crédito (airtime)
+    # --- 8) Comprar crédito ---
     if parts[0] == "8":
         user = get_or_create_user(db, phone)
         if verify_pin(user, DEFAULT_PIN):
@@ -378,5 +360,5 @@ def ussd_callback(
             db.commit()
             return end(f"Crédito comprado: {amount} MZN. {balance_line(user)}")
 
-    # fallback: menu
+    # fallback
     return main_menu()
